@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+.Python
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# Build / dist
+build/
+dist/
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project data (large binaries)
+# Keep source code and small configs in Git; exclude heavy datasets
+Gazefollow/
+VAT/images/
+merged_images/
+labels.csv
+
+# If you want to version a few sample images, create a `samples/` folder
+# and remove it from ignore rules (uncomment the next line):
+# !samples/
