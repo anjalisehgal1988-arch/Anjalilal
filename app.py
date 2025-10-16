@@ -4,6 +4,7 @@ import random
 import os
 from PIL import Image
 import time
+import portalocker
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-for-sessions'  # Required for sessions
@@ -93,20 +94,56 @@ if not os.path.exists(annotations_file):
         print(f"Warning: could not initialize annotations file '{annotations_file}': {e}")
 
 def get_next_available_index():
-    """Get the next available index for annotations.json"""
+    """Get the next available index for annotations.json under a lock."""
     try:
-        with open(annotations_file, 'r') as f:
-            data = json.load(f)
-        
-        max_index = -1
-        for entry in data:
-            if 'index' in entry:
-                max_index = max(max_index, entry['index'])
-        
-        return max_index + 1
+        with portalocker.Lock(annotations_file, 'r+', timeout=10) as f:
+            f.seek(0)
+            try:
+                data = json.load(f)
+            except Exception:
+                data = []
+            max_index = -1
+            for entry in data:
+                if 'index' in entry:
+                    try:
+                        max_index = max(max_index, int(entry['index']))
+                    except Exception:
+                        pass
+            return max_index + 1
     except Exception as e:
         print(f"Error getting next index: {e}")
         return 0
+
+def reserve_annotation_index():
+    """Reserve and return a unique annotation index using an exclusive file lock."""
+    try:
+        with portalocker.Lock(annotations_file, 'r+', timeout=10) as f:
+            f.seek(0)
+            try:
+                data = json.load(f)
+            except Exception:
+                data = []
+            max_index = -1
+            for entry in data:
+                if 'index' in entry:
+                    try:
+                        max_index = max(max_index, int(entry['index']))
+                    except Exception:
+                        pass
+            new_index = max_index + 1
+            data.append({'index': new_index, 'annotations': []})
+            f.seek(0)
+            f.truncate()
+            json.dump(data, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+            return new_index
+    except Exception as e:
+        print(f"Error reserving next index: {e}")
+        return get_next_available_index()
 
 def _get_or_create_uid():
     uid = session.get('uid')
@@ -171,43 +208,55 @@ def save_gaze3d(index):
         if 'user_annotation_indices' not in session:
             session['user_annotation_indices'] = {}
         if str(index) not in session['user_annotation_indices']:
-            session['user_annotation_indices'][str(index)] = get_next_available_index()
+            session['user_annotation_indices'][str(index)] = reserve_annotation_index()
         annotation_index = session['user_annotation_indices'][str(index)]
 
-        # Load and update annotations.json
-        with open(annotations_file, 'r') as f:
-            all_annotations = json.load(f)
+        # Load and update annotations.json with exclusive lock
+        with portalocker.Lock(annotations_file, 'r+', timeout=10) as f:
+            f.seek(0)
+            try:
+                all_annotations = json.load(f)
+            except Exception:
+                all_annotations = []
 
-        existing_entry_idx = None
-        for i, entry in enumerate(all_annotations):
-            if entry.get('index') == annotation_index:
-                existing_entry_idx = i
-                break
+            existing_entry_idx = None
+            for i, entry in enumerate(all_annotations):
+                if entry.get('index') == annotation_index:
+                    existing_entry_idx = i
+                    break
 
-        # Ensure there is an entry for this annotation index
-        if existing_entry_idx is None:
-            all_annotations.append({'index': annotation_index, 'annotations': []})
-            existing_entry_idx = len(all_annotations) - 1
+            # Ensure there is an entry for this annotation index
+            if existing_entry_idx is None:
+                all_annotations.append({'index': annotation_index, 'annotations': []})
+                existing_entry_idx = len(all_annotations) - 1
 
-        entry = all_annotations[existing_entry_idx]
-        if 'annotations' not in entry or not isinstance(entry['annotations'], list):
-            entry['annotations'] = []
+            entry = all_annotations[existing_entry_idx]
+            if 'annotations' not in entry or not isinstance(entry['annotations'], list):
+                entry['annotations'] = []
 
-        # Decide which annotation object to update
-        if ann_idx is not None and 0 <= ann_idx < len(entry['annotations']):
-            target_ann = entry['annotations'][ann_idx]
-            target_ann['gaze_3d'] = [X, Y, Z]
-            if gaze_number is not None:
-                target_ann['gaze_number'] = gaze_number
-        else:
-            # If specific index not provided or out of range, append a minimal annotation
-            new_ann = {'bbox': None, 'gaze': None, 'gaze_3d': [X, Y, Z]}
-            if gaze_number is not None:
-                new_ann['gaze_number'] = gaze_number
-            entry['annotations'].append(new_ann)
+            # Decide which annotation object to update
+            if ann_idx is not None and 0 <= ann_idx < len(entry['annotations']):
+                target_ann = entry['annotations'][ann_idx]
+                target_ann['gaze_3d'] = [X, Y, Z]
+                if gaze_number is not None:
+                    target_ann['gaze_number'] = gaze_number
+                if 'image_path' not in target_ann:
+                    target_ann['image_path'] = user_images[index].get('path')
+            else:
+                # If specific index not provided or out of range, append a minimal annotation
+                new_ann = {'bbox': None, 'gaze': None, 'gaze_3d': [X, Y, Z], 'image_path': user_images[index].get('path')}
+                if gaze_number is not None:
+                    new_ann['gaze_number'] = gaze_number
+                entry['annotations'].append(new_ann)
 
-        with open(annotations_file, 'w') as f:
+            f.seek(0)
+            f.truncate()
             json.dump(all_annotations, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
 
         return jsonify({"status": "ok", "index": annotation_index, "annotation_idx": ann_idx, "gaze_3d": [X, Y, Z]})
     except Exception as e:
@@ -378,34 +427,53 @@ def label_image(index):
         annotations_data = request.form.get('annotations')
         if annotations_data:
             annotations = json.loads(annotations_data)
-            
+
+            # Attach image_path to each annotation
+            item = get_user_images()[index]
+            for ann in annotations:
+                if isinstance(ann, dict):
+                    ann['image_path'] = item.get('path')
+
             # Get or assign a unique annotation index for this user's image
+            if 'user_annotation_indices' not in session:
+                session['user_annotation_indices'] = {}
             if str(index) not in session['user_annotation_indices']:
-                session['user_annotation_indices'][str(index)] = get_next_available_index()
-            
+                session['user_annotation_indices'][str(index)] = reserve_annotation_index()
+
             annotation_index = session['user_annotation_indices'][str(index)]
-            
-            with open(annotations_file, 'r') as f:
-                all_annotations = json.load(f)
-            
-            # Check if this annotation index already exists and update it, otherwise append
-            existing_entry_idx = None
-            for i, entry in enumerate(all_annotations):
-                if entry.get('index') == annotation_index:
-                    existing_entry_idx = i
-                    break
-            
-            annotation_entry = {'index': annotation_index, 'annotations': annotations}
-            
-            if existing_entry_idx is not None:
-                all_annotations[existing_entry_idx] = annotation_entry
-                print(f"Updated existing annotations for index {annotation_index}: {annotations}")
-            else:
-                all_annotations.append(annotation_entry)
-                print(f"Added new annotations for index {annotation_index}: {annotations}")
-            
-            with open(annotations_file, 'w') as f:
+
+            # Update annotations.json using exclusive lock
+            with portalocker.Lock(annotations_file, 'r+', timeout=10) as f:
+                f.seek(0)
+                try:
+                    all_annotations = json.load(f)
+                except Exception:
+                    all_annotations = []
+
+                # Check if this annotation index already exists and update it, otherwise append
+                existing_entry_idx = None
+                for i, entry in enumerate(all_annotations):
+                    if entry.get('index') == annotation_index:
+                        existing_entry_idx = i
+                        break
+
+                annotation_entry = {'index': annotation_index, 'annotations': annotations}
+
+                if existing_entry_idx is not None:
+                    all_annotations[existing_entry_idx] = annotation_entry
+                    print(f"Updated existing annotations for index {annotation_index}: {annotations}")
+                else:
+                    all_annotations.append(annotation_entry)
+                    print(f"Added new annotations for index {annotation_index}: {annotations}")
+
+                f.seek(0)
+                f.truncate()
                 json.dump(all_annotations, f)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
             
             next_index = min(index + 1, len(user_images) - 1)
             if next_index == index:  # We've reached the last image

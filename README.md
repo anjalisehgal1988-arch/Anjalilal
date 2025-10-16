@@ -44,6 +44,27 @@ Lightweight Flask app to label gaze annotations on images. Draw a face bounding 
   - `Gazefollow/`, `VAT/images/`, `merged_images/`, and `labels.csv` are excluded.
   - If you need a few demo images in Git, place them under `samples/` and adjust `.gitignore` accordingly.
 
+## Participant Kit (Local-and-send)
+- Prepare a zip for participants that includes:
+  - This project folder and `merged_images/gazefollow/...` and `merged_images/vat/...` with the fixed 500 images.
+  - `run.bat` (Windows) or instructions to run `python app.py`.
+- Participant run (Windows):
+  - Optional: set a personalized annotations path (replaces default `annotations.json`):
+    - `set ANNOTATIONS_PATH=%CD%\annotations_<ID>.json` then `python app.py`
+  - Or run `run.bat` and rename `annotations.json` to `annotations_<ID>.json` before sending.
+- Participant run (macOS/Linux):
+  - `python3 -m venv .venv && source .venv/bin/activate`
+  - `pip install -r requirements.txt`
+  - Optional personalized path: `ANNOTATIONS_PATH=$PWD/annotations_<ID>.json python3 app.py`
+  - Otherwise run `python3 app.py` and rename the output file.
+
+### Collecting and Merging Participant Files
+- Ask each participant to send their `annotations_<ID>.json` back.
+- Put all files into `participants/` and run:
+  - `python merge_annotations.py participants/*.json annotations_merged.json --tag-annotator`
+- Result: `annotations_merged.json` groups annotations by `image_path`, assigns new sequential indices, and tags each entry with `annotator_id`.
+- Keep the original `annotations.json` files for audit; `annotations_merged.json` is your master file for analysis.
+
 ## GitHub
 - Suggested repo: `https://github.com/anjalisehgal1988-arch/gaze_detection`
 - Initial push:
@@ -70,13 +91,19 @@ Lightweight Flask app to label gaze annotations on images. Draw a face bounding 
   - On Render: New → Blueprint → select this repo.
   - Render will provision a Web Service with:
     - Build: `pip install -r requirements.txt`
-    - Start: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 2`
+    - Start: `python bootstrap_images.py && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1`
     - Disk mounted at `/var/data`.
     - Env vars:
       - `ANNOTATIONS_PATH=/var/data/annotations.json`
       - `MERGED_ROOT=/var/data/merged_images`
-  - Upload your images to the mounted disk (`/var/data/merged_images`).
+      - (Optional) `MERGED_ZIP_URL=https://.../merged_images.zip` — if set, the service will download and unpack images into `/var/data/merged_images` on first start.
+  - Upload your images to the mounted disk (`/var/data/merged_images`) or provide a zip via `MERGED_ZIP_URL`.
   - Open the public URL; annotations persist to `/var/data/annotations.json`.
+
+### Multi-user notes
+- To avoid concurrent write issues while multiple users annotate, the service runs with a single Gunicorn worker.
+- Annotations are saved under a file lock with `portalocker`, and each image gets a reserved annotation index for uniqueness.
+- Each saved annotation now includes `image_path` so you can link labels to source images reliably.
 
 ## License
 - See `LICENSE` for terms.

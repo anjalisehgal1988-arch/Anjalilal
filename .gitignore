@@ -26,7 +26,7 @@ Thumbs.db
 # Project data (large binaries)
 # Keep source code and small configs in Git; exclude heavy datasets
 Gazefollow/
-VAT/images/
+VAT/
 merged_images/
 labels.csv
 
